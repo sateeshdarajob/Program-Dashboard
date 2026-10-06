@@ -66,6 +66,37 @@ def compute_salary() -> dict[str, tuple[int, int]]:
 FONT_REG = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
 
+def _insert_centered(
+    page: fitz.Page,
+    rect: fitz.Rect,
+    text: str,
+    *,
+    fontsize: float,
+    bold: bool,
+) -> None:
+    fontfile = FONT_BOLD if bold else FONT_REG
+    font = fitz.Font(fontfile=fontfile)
+    text_w = font.text_length(text, fontsize=fontsize)
+    x = rect.x0 + (rect.width - text_w) / 2
+    baseline = rect.y0 + fontsize
+    page.insert_text(
+        (x, baseline),
+        text,
+        fontsize=fontsize,
+        fontfile=fontfile,
+        fontname="NotoSansBold" if bold else "NotoSans",
+        color=(0, 0, 0),
+    )
+
+
+def _apply_text_only_redactions(page: fitz.Page) -> None:
+    """Remove redacted text only — keep gray row fills and watermark image."""
+    page.apply_redactions(
+        images=fitz.PDF_REDACT_IMAGE_NONE,
+        graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+        text=fitz.PDF_REDACT_TEXT_REMOVE,
+    )
+
 
 def replace_centered(
     page: fitz.Page,
@@ -76,30 +107,21 @@ def replace_centered(
     bold: bool = False,
     occurrence: int | None = None,
 ) -> None:
+    """Replace one value, preserving gray row / watermark backgrounds."""
     hits = page.search_for(old)
     if not hits:
         raise RuntimeError(f"Could not find {old!r} on page {page.number + 1}")
     if occurrence is not None:
         hits = [hits[occurrence]]
-    fontfile = FONT_BOLD if bold else FONT_REG
-    font = fitz.Font(fontfile=fontfile)
+    inserts: list[tuple[fitz.Rect, str, float, bool]] = []
     for rect in hits:
-        # Keep redaction inside the glyph box to avoid touching neighboring rows.
-        tight = fitz.Rect(rect.x0 - 1.0, rect.y0 + 0.8, rect.x1 + 1.0, rect.y1 - 0.8)
-        page.add_redact_annot(tight, fill=(1, 1, 1))
-    page.apply_redactions()
-    for rect in hits:
-        text_w = font.text_length(new, fontsize=fontsize)
-        x = rect.x0 + (rect.width - text_w) / 2
-        baseline = rect.y0 + fontsize
-        page.insert_text(
-            (x, baseline),
-            new,
-            fontsize=fontsize,
-            fontfile=fontfile,
-            fontname="NotoSansBold" if bold else "NotoSans",
-            color=(0, 0, 0),
-        )
+        tight = fitz.Rect(rect.x0 - 0.6, rect.y0 + 0.6, rect.x1 + 0.6, rect.y1 - 0.6)
+        # No fill: do not paint white boxes over gray rows / watermark.
+        page.add_redact_annot(tight, fill=None)
+        inserts.append((rect, new, fontsize, bold))
+    _apply_text_only_redactions(page)
+    for rect, text, size, is_bold in inserts:
+        _insert_centered(page, rect, text, fontsize=size, bold=is_bold)
 
 
 def update_designation(page: fitz.Page) -> None:
@@ -151,55 +173,47 @@ def update_emoluments(page: fitz.Page) -> None:
 
 
 def update_salary_page(page: fitz.Page, salary: dict[str, tuple[int, int]]) -> None:
-    # (old_text, new_text, fontsize, bold)
-    replacements = [
-        ("1,08,393", inr(salary["basic"][0]), 10.5, False),
-        ("13,00,716", inr(salary["basic"][1]), 10.0, False),
-        ("20,507", inr(salary["lta"][0]), 10.5, False),
-        ("2,46,084", inr(salary["lta"][1]), 10.0, False),
-        ("65,036", inr(salary["hra"][0]), 10.5, False),
-        ("7,80,432", inr(salary["hra"][1]), 10.0, False),
-        ("86,011", inr(salary["conveyance"][0]), 10.5, False),
-        ("10,32,132", inr(salary["conveyance"][1]), 10.0, False),
-        ("2,79,947", inr(salary["fixed"][0]), 10.5, True),
-        ("33,59,364", inr(salary["fixed"][1]), 10.0, True),
-        ("13,007", inr(salary["pf"][0]), 10.5, False),
-        ("1,56,084", inr(salary["pf"][1]), 10.0, False),
-        ("7,046", inr(salary["gratuity"][0]), 10.5, False),
-        ("84,552", inr(salary["gratuity"][1]), 10.0, False),
+    """Replace Annexure I amounts in one pass so table formatting stays intact."""
+    # (old_text, new_text, fontsize, bold, occurrence|None)
+    replacements: list[tuple[str, str, float, bool, int | None]] = [
+        ("1,08,393", inr(salary["basic"][0]), 10.5, False, None),
+        ("13,00,716", inr(salary["basic"][1]), 10.0, False, None),
+        ("20,507", inr(salary["lta"][0]), 10.5, False, None),
+        ("2,46,084", inr(salary["lta"][1]), 10.0, False, None),
+        ("65,036", inr(salary["hra"][0]), 10.5, False, None),
+        ("7,80,432", inr(salary["hra"][1]), 10.0, False, None),
+        ("86,011", inr(salary["conveyance"][0]), 10.5, False, None),
+        ("10,32,132", inr(salary["conveyance"][1]), 10.0, False, None),
+        ("2,79,947", inr(salary["fixed"][0]), 10.5, True, None),
+        ("33,59,364", inr(salary["fixed"][1]), 10.0, True, None),
+        ("13,007", inr(salary["pf"][0]), 10.5, False, None),
+        ("1,56,084", inr(salary["pf"][1]), 10.0, False, None),
+        ("7,046", inr(salary["gratuity"][0]), 10.5, False, None),
+        ("84,552", inr(salary["gratuity"][1]), 10.0, False, None),
+        # Gross then CTC: first/second matches in document order
+        ("3,00,000", inr(salary["ctc"][0]), 10.5, True, 0),
+        ("3,00,000", inr(salary["ctc"][0]), 10.5, True, 1),
+        ("36,00,000", inr(salary["ctc"][1]), 10.0, True, 0),  # Gross annual
+        ("36,00,000", inr(salary["ctc"][1]), 10.5, True, 1),  # CTC annual
     ]
 
-    for old, new, size, bold in replacements:
-        replace_centered(page, old, new, fontsize=size, bold=bold)
+    inserts: list[tuple[fitz.Rect, str, float, bool]] = []
+    for old, new, size, bold, occurrence in replacements:
+        hits = page.search_for(old)
+        if not hits:
+            raise RuntimeError(f"Could not find {old!r} on page {page.number + 1}")
+        if occurrence is not None:
+            if occurrence >= len(hits):
+                raise RuntimeError(f"Missing occurrence {occurrence} of {old!r}")
+            hits = [hits[occurrence]]
+        for rect in hits:
+            tight = fitz.Rect(rect.x0 - 0.6, rect.y0 + 0.6, rect.x1 + 0.6, rect.y1 - 0.6)
+            page.add_redact_annot(tight, fill=None)
+            inserts.append((rect, new, size, bold))
 
-    # Gross / CTC rows: two monthly 3,00,000 and two annual 36,00,000
-    monthly_hits = page.search_for("3,00,000")
-    if len(monthly_hits) < 2:
-        raise RuntimeError(f"Expected 2 monthly CTC values, found {len(monthly_hits)}")
-    for _ in range(2):
-        replace_centered(
-            page,
-            "3,00,000",
-            inr(salary["ctc"][0]),
-            fontsize=10.5,
-            bold=True,
-            occurrence=0,
-        )
-
-    # Preserve original font sizes: Gross annual=10pt, CTC annual=10.5pt
-    annual_hits = page.search_for("36,00,000")
-    if len(annual_hits) < 2:
-        raise RuntimeError(f"Expected 2 annual CTC values, found {len(annual_hits)}")
-    annual_sizes = [10.0, 10.5]
-    for size in annual_sizes:
-        replace_centered(
-            page,
-            "36,00,000",
-            inr(salary["ctc"][1]),
-            fontsize=size,
-            bold=True,
-            occurrence=0,
-        )
+    _apply_text_only_redactions(page)
+    for rect, text, size, is_bold in inserts:
+        _insert_centered(page, rect, text, fontsize=size, bold=is_bold)
 
 
 def main() -> int:

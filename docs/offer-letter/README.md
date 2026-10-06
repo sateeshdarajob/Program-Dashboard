@@ -26,3 +26,5 @@ python3 update_offer_letter.py candidate_fad9_original.pdf candidate_fad9.pdf
 ```
 
 Requires `pymupdf` and Noto Sans fonts at `/usr/share/fonts/truetype/noto/`.
+
+Annexure I edits remove only the old number glyphs (no white fill boxes), so gray total-row backgrounds and the page watermark stay intact like the original.
